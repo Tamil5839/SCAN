@@ -1,0 +1,9 @@
+# Python 3.11+ ; system: ffmpeg (with libx264) and cairo
+segno>=1.6
+numpy>=1.26
+pycairo>=1.25
+opencv-python-headless>=4.8
+zxing-cpp>=2.2
+pytest>=8
+# optional third decoder for the report (needs the libzbar0 system library)
+pyzbar>=0.1.9

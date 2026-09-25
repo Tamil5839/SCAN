@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+# rendered intermediates (reproducible with render.py)
+scan_me/output/frames/
+scan_me/output/tune_*/
+scan_me/output/frame_*.png
+scan_me/output/preview.mp4
+scan_me/output/*.log
+scan_me/output/*.time
