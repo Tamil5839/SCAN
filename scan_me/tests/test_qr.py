@@ -245,16 +245,23 @@ def _zxing_threshold_reference(gray):
                 flat[last + 1:i] = flat[i]
             last = i
     flat[last + 1:] = flat[max(last, 0)]
-    return np.repeat(np.repeat(flat.reshape(sh, sw), B, 0), B, 1)[:h, :w]
+    out = flat.reshape(sh, sw)
+    full = np.zeros((h, w), int)
+    for y in range(sh):                                     # later blocks overwrite, like ThresholdImage
+        y0 = min(y * B, h - B)
+        for x in range(sw):
+            x0 = min(x * B, w - B)
+            full[y0:y0 + B, x0:x0 + B] = out[y, x]
+    return full
 
 
 def test_zxing_model_matches_reference_port():
     rng = np.random.default_rng(1)
-    img = np.full((160, 200), 230, np.uint8)
+    img = np.full((163, 205), 230, np.uint8)                 # not a multiple of 8
     for _ in range(40):
-        x, y = rng.integers(0, 190), rng.integers(0, 150)
+        x, y = rng.integers(0, 195), rng.integers(0, 153)
         img[y:y + rng.integers(3, 20), x:x + rng.integers(3, 20)] = rng.integers(0, 120)
-    img[100:160, 0:60] = 200                    # a flat area exercises the gap filling
+    img[100:163, 0:60] = 200                    # a flat area exercises the gap filling
     assert np.array_equal(scanmodel.zxing_threshold_map(img), _zxing_threshold_reference(img))
 
 
@@ -264,3 +271,21 @@ def test_opencv_model_agrees_with_opencv_on_plain_code():
     img = plain_render(dark, scale=geo.module)
     read, _ = scanmodel.opencv_read(cv2.cvtColor(img, cv2.COLOR_RGB2GRAY), geo)
     assert np.array_equal(read[qrlayer.layout(VERSION).data], dark[qrlayer.layout(VERSION).data])
+
+
+# ------------------------------------------------------------------ render
+
+def test_repair_smoothing_keeps_needs_and_ramps():
+    import render
+    seg = SEGS[5]
+    frames = list(range(seg.start - 3, seg.start + 20))          # crosses a segment boundary
+    n = qrlayer.layout(VERSION).n
+    maps = {i: np.zeros((n, n), np.float32) for i in frames}
+    maps[seg.start + 10][4, 7] = 1.0                            # one repair, one frame
+    maps[seg.start - 2][9, 9] = 1.0                             # previous segment
+    out = render.smooth_repairs(SEGS, frames, maps, reach=4)
+    for i in frames:
+        assert (out[i] >= maps[i] - 1e-6).all()                 # never less than needed
+    ramp = [float(out[i][4, 7]) for i in range(seg.start, seg.start + 20)]
+    assert max(abs(a - b) for a, b in zip(ramp, ramp[1:])) <= 0.2 + 1e-6
+    assert out[seg.start][9, 9] == 0.0                          # not carried across the boundary

@@ -15,7 +15,9 @@ and a bright dot inside a dark area prints a black ring around itself. Soft
 edges, a darkest tone well above the dots' black and no bright dots inside
 ink keep both OpenCV and zxing (which samples module centres) reading every
 module correctly. scanmodel.py predicts both reads; `frame()` uses it as a
-safety net and re-renders when a module's margin is thin.
+safety net: when a Reed-Solomon block holds too many predicted-wrong or
+thin-margin codewords, the worst are repaired (ink lifted around a light
+module, or a dark dot enlarged) and the frame is rendered again.
 """
 
 from __future__ import annotations
@@ -112,18 +114,6 @@ class Compositor:
     def module(self) -> int:
         return self.geo.module
 
-    def scene_to_px(self) -> float:
-        """Scene coordinates are 0..100 across the whole frame."""
-        return self.size / 100.0
-
-    def canvas_box(self):
-        """Region (scene units) where the picture is at full strength."""
-        g = self.geo
-        lo = g.origin + (6.5 + config.SAFE_FADE_END) * g.module
-        hi = g.origin + (g.n - config.SAFE_FADE_END) * g.module
-        s = 100.0 / self.size
-        return lo * s, lo * s, hi * s, hi * s
-
     # -------------------------------------------------------------- layers
 
     def _paper_texture(self) -> np.ndarray:
@@ -152,12 +142,8 @@ class Compositor:
         border_fade = smoothstep(config.BORDER_FADE_START, config.BORDER_FADE_END, border)
         hazard = np.zeros((self.size, self.size), np.uint8)
         func = lay.function.copy()
-        pos = qrlayer.consts.ALIGNMENT_POS[lay.version - 2] if lay.version > 1 else ()
-        for ar in pos:
-            for ac in pos:
-                if func[ar, ac] and not (ar < 8 and ac < 8) and not (ar < 8 and ac > lay.n - 9) \
-                        and not (ar > lay.n - 9 and ac < 8):
-                    func[ar - 2:ar + 3, ac - 2:ac + 3] = False
+        for ar, ac in qrlayer.alignment_centres(lay.version):
+            func[ar - 2:ar + 3, ac - 2:ac + 3] = False
         m = g.module
         big = np.kron(func, np.ones((m, m), np.uint8)).astype(bool)
         hazard[g.origin:g.origin + g.extent, g.origin:g.origin + g.extent][big] = 1
@@ -168,7 +154,7 @@ class Compositor:
         # and the timing lines: they would read as stray patches
         lo = g.origin + (6.5 + config.SAFE_FADE_END) * m
         xs = np.arange(self.size, dtype=np.float32)
-        edge = smoothstep(lo - 4.5 * m / 2.6, lo + 0.4 * m, xs)
+        edge = smoothstep(lo - 2.6 * m, lo + 1.0 * m, xs)
         return (safe * edge[None, :] * edge[:, None]).astype(np.float32)
 
     def _dot_atlas(self) -> np.ndarray:
@@ -237,17 +223,17 @@ class Compositor:
     def render_picture(self, draw, t: float, look: Look) -> Picture:
         """Rasterise scene densities at half resolution, soften, upsample.
 
-        `draw(ink_ctx, red_ctx, t, canvas)` paints densities (alpha) in scene
-        units (0..100 across the frame).
+        `draw(ink_ctx, red_ctx, t)` paints densities (alpha) in scene units
+        (0..100 across the frame) and may return {"softness": px at 1080}.
         """
         h = self.size // 2
         surfs = [cairo.ImageSurface(cairo.FORMAT_A8, h, h) for _ in range(2)]
         ctxs = [cairo.Context(s) for s in surfs]
         for ctx in ctxs:
             ctx.scale(h / 100.0, h / 100.0)
-        meta = draw(ctxs[0], ctxs[1], t, self.canvas_box()) or {}
+        meta = draw(ctxs[0], ctxs[1], t) or {}
         out = []
-        sigma = config.PICTURE_SOFTNESS_PX * self.k / 2.0
+        sigma = meta.get("softness", config.PICTURE_SOFTNESS_PX) * self.k / 2.0
         for s in surfs:
             s.flush()
             a = np.ndarray((h, s.get_stride()), np.uint8, buffer=s.get_data())[:, :h].astype(np.float32) / 255.0
@@ -288,9 +274,10 @@ class Compositor:
         dark_size = fmin + (fmax - fmin) * darkness
         if look.clean > 0:
             dark_size = dark_size + (fclean - dark_size) * look.clean
-        # light module: a paper-white dot over paper, vanishing over ink (a
-        # bright dot inside ink reads as a dark ring to area-sampling decoders)
-        light_size = fmin * (1.0 - smoothstep(0.02, 0.12, darkness))
+        # light module: over paper a paper-white dot a bit larger than the
+        # minimum (matched); over ink it vanishes - a bright dot inside ink
+        # reads as a dark ring to area-sampling decoders
+        light_size = (fmin + 0.5 * (fmax - fmin)) * (1.0 - smoothstep(0.02, 0.12, darkness))
         size = np.where(dark, dark_size, light_size)
         if look.reveal is not None:
             w = 0.22
@@ -300,7 +287,7 @@ class Compositor:
 
     def draw_code(self, rgb: np.ndarray, dark: np.ndarray, sizes: np.ndarray, mask: int) -> np.ndarray:
         g, lay = self.geo, self.lay
-        n, m, o, e = lay.n, g.module, g.origin, g.extent
+        m, o, e = g.module, g.origin, g.extent
         idx = np.rint(sizes * _ATLAS_STEPS).astype(np.int32)
         idx[lay.function] = 0
         alpha = self.atlas[idx].transpose(0, 2, 1, 3).reshape(e, e)
@@ -317,13 +304,16 @@ class Compositor:
     # ---------------------------------------------------------------- frame
 
     def frame(self, pic: Picture, dark: np.ndarray, mask: int, look: Look,
-              safety: bool = True):
-        """Render the final RGB frame; returns (rgb uint8, SafetyReport)."""
-        lay, g = self.lay, self.geo
-        n, m = lay.n, g.module
-        data = lay.data
-        lift = np.zeros((n, n), np.float32)
-        grow = np.zeros((n, n), np.float32)
+              safety: bool = True, lift0: np.ndarray | None = None, grow0: np.ndarray | None = None):
+        """Render the final RGB frame; returns (rgb uint8, SafetyReport).
+
+        `lift0` / `grow0` start the safety net from repairs already known
+        for this frame (render.py smooths them over time so they fade in
+        and out instead of popping).
+        """
+        n = self.lay.n
+        lift = np.zeros((n, n), np.float32) if lift0 is None else lift0.astype(np.float32).copy()
+        grow = np.zeros((n, n), np.float32) if grow0 is None else grow0.astype(np.float32).copy()
         report = SafetyReport()
         iterations = config.SAFETY_ITERATIONS if safety else 0
         for it in range(iterations + 1):
@@ -347,6 +337,7 @@ class Compositor:
                 break
             grow = np.where(fix & dark, np.minimum(grow + 0.07, _GROW_MAX), grow)
             lift = np.where(fix & ~dark, np.minimum(lift + 0.34, 1.0), lift)
+        self.last_repair = (lift, grow)      # for inspection / temporal smoothing
         return rgb, report
 
     def _lift_pixels(self, lift: np.ndarray) -> np.ndarray:
@@ -354,20 +345,22 @@ class Compositor:
         m = g.module
         px = np.zeros((self.size, self.size), np.float32)
         px[g.origin:g.origin + g.extent, g.origin:g.origin + g.extent] = np.kron(lift, np.ones((m, m), np.float32))
-        px = cv2.GaussianBlur(px, (0, 0), 0.55 * m)
-        return np.clip(px * 2.2, 0.0, 1.0)
+        px = cv2.GaussianBlur(px, (0, 0), config.LIFT_SIGMA * m)
+        return np.clip(px * config.LIFT_GAIN, 0.0, 1.0)
 
     def check(self, rgb: np.ndarray, dark: np.ndarray):
         """Predict both decoders' reads of a clean frame.
 
-        Returns (report, fix) where `fix` marks the modules to strengthen:
-        every module predicted to read wrong, plus the thin-margin modules of
-        any RS block whose count of at-risk codewords exceeds the budget.
+        Returns (report, fix). Per RS block, codewords holding a module that
+        is predicted to read wrong, or to read with a thin margin, are
+        ranked by how bad their worst module is; `fix` marks the modules of
+        just enough of the worst ones to bring the block within
+        SAFE_MAX_ERRORS wrong and SAFE_MAX_RISKY wrong-or-thin codewords.
         """
         lay = self.lay
         gray = scanmodel.to_gray(rgb)
         cv_dark, cv_margin = scanmodel.opencv_read(gray, self.geo)
-        zx_dark, zx_centre, zx_worst = scanmodel.zxing_read(gray, self.geo, jitter=max(1, round(2 * self.k)))
+        zx_dark, _, zx_worst = scanmodel.zxing_read(gray, self.geo, jitter=max(1, round(2 * self.k)))
         data = lay.data
         # signed margins, positive = read on the correct side
         cv_ok = np.where(dark, -cv_margin, cv_margin)
@@ -390,7 +383,7 @@ class Compositor:
             need = max(n_wrong - config.SAFE_MAX_ERRORS, len(words) - config.SAFE_MAX_RISKY, 0)
             for w in words[np.argsort(-worst)][:need]:
                 fix |= in_b & (cw == w)
-        risky = qrlayer.codeword_errors(weak | wrong, np.zeros_like(weak), lay)
+        risky = qrlayer.codewords_touched(weak | wrong, lay)
         rep = SafetyReport()
         rep.cv_block_errors = int(qrlayer.codeword_errors(cv_dark, dark, lay).max())
         rep.zx_block_errors = int(qrlayer.codeword_errors(zx_dark, dark, lay).max())

@@ -22,8 +22,8 @@ import config
 
 TAU = 2 * math.pi
 
-# Canvas anchor (scene units) - centre of the area where the picture is at
-# full strength, see Compositor.canvas_box().
+# Canvas anchor (scene units): centre of the area where the picture is at
+# full strength (compose.Compositor._safe_mask fades it out elsewhere).
 CX, CY = 57.5, 57.0
 
 # Act boundaries in seconds.
@@ -214,13 +214,13 @@ def draw_flower(ink, red, t, opacity=1.0, detached=False):
         p0, p1, p2, p3 = bezier_split(FL_BASE, FL_C1, FL_C2, FL_HEAD, grow)
         ink.move_to(*p0)
         ink.curve_to(*p1, *p2, *p3)
-        ink.set_line_width(4.2)
+        ink.set_line_width(3.6)
         ink.set_line_cap(cairo.LINE_CAP_ROUND)
         ink.set_source_rgba(0, 0, 0, 0.9 * opacity)
         ink.stroke()
 
     # leaves unfold from the stem
-    for k, (u, side, t0) in enumerate(((0.33, -1, 3.0), (0.55, 1, 3.6))):
+    for u, side, t0 in ((0.33, -1, 3.0), (0.55, 1, 3.6)):
         s = ease_out_back(ramp(t, t0, t0 + 1.4), 1.2)
         if s <= 0 or grow < u:
             continue
@@ -254,12 +254,6 @@ def draw_flower(ink, red, t, opacity=1.0, detached=False):
     red.restore()
 
 
-def flower_petal_tip_state(t_flower):
-    """Where the falling petal sits on the (swaying) flower."""
-    ang = _petal_angle(FALLING_PETAL)
-    return FL_HEAD, ang
-
-
 def draw_scene_flower(ink, red, t):
     draw_flower(ink, red, t - T_FLOWER[0])
 
@@ -267,57 +261,58 @@ def draw_scene_flower(ink, red, t):
 # ==================================================================== BIRD
 
 BIRD_PATH = [
-    (52.0, 63.0), (57.0, 56.0), (64.0, 51.0), (70.0, 46.5), (67.5, 41.0),
-    (58.0, 40.5), (48.5, 43.5), (44.5, 51.0), (48.0, 58.5), (55.0, 62.0),
-    (60.0, 63.5),
+    (52.0, 63.0), (58.0, 56.0), (66.0, 50.0), (74.0, 46.0), (76.0, 39.5),
+    (67.0, 36.5), (55.0, 38.0), (44.0, 42.5), (39.5, 51.0), (44.5, 59.0),
+    (53.0, 62.5), (60.0, 64.0),
 ]
 GROUND_Y = 82.5
-BIRD_SCALE = 1.75
+BIRD_SCALE = 1.35
 
 
-def draw_bird(ink, red, x, y, heading, flap, scale=1.0, morph=1.0, density=0.95, breast=0.9):
-    """Side-view bird. `flap` in -1..1 (wing tips up..down). `morph` 0..1
-    grows wings/head/tail out of a petal-shaped body."""
+def draw_bird(ink, red, x, y, heading, flap, scale=1.0, morph=1.0, density=0.95, breast=0.9, fold=0.0):
+    """A bird seen from below, flying along `heading` - the swallow of ink
+    painting. `flap` in -1..1 is the wing elevation (the projected span
+    shrinks at the top and bottom of the stroke), `fold` 0..1 sweeps the
+    wings back for a dive, `morph` 0..1 grows wings, head and tail out of a
+    petal-shaped body."""
     ink.save()
     red.save()
     for ctx in (ink, red):
         ctx.translate(x, y)
         ctx.rotate(heading)
-        if math.cos(heading) < 0:          # keep the back up when flying left
-            ctx.scale(1, -1)
         ctx.scale(scale, scale)
     m = smooth(morph)
-    # body
-    ellipse(ink, 0, 0, lerp(5.2, 6.6, m), lerp(2.6, 2.5, m))
+    # body: a slim spindle
+    ellipse(ink, 0, 0, lerp(5.6, 6.6, m), lerp(2.7, 1.9, m))
     fill(ink, density * m)
-    # breast keeps the petal's colour
-    ellipse(red, lerp(0, 1.8, m), lerp(0, 1.1, m), lerp(5.4, 3.2, m), lerp(2.7, 1.5, m))
-    fill(red, breast * lerp(1.0, 0.85, m))
+    # the throat keeps the petal's colour
+    ellipse(red, lerp(0.0, 3.4, m), 0, lerp(5.6, 2.1, m), lerp(2.8, 1.35, m))
+    fill(red, breast)
     if m > 0:
-        # head and beak
-        ink.arc(5.6, -1.0, 2.35 * m, 0, TAU)
+        ink.arc(6.3, 0, 1.95 * m, 0, TAU)                     # head
         fill(ink, density)
-        ink.move_to(7.3, -1.6)
-        ink.line_to(7.3 + 3.2 * m, -0.6)
-        ink.line_to(7.3, 0.2)
+        ink.move_to(7.8, -0.7)                                # beak
+        ink.line_to(7.8 + 2.3 * m, 0)
+        ink.line_to(7.8, 0.7)
         ink.close_path()
         fill(ink, density)
-        # tail
-        ink.move_to(-5.0, -0.8)
-        ink.line_to(-5.0 - 5.8 * m, -2.9 * m)
-        ink.line_to(-5.0 - 5.2 * m, 1.9 * m)
+        ink.move_to(-5.0, -1.3)                               # forked tail
+        ink.line_to(-5.0 - 6.6 * m, -3.3 * m)
+        ink.line_to(-5.0 - 3.4 * m, 0)
+        ink.line_to(-5.0 - 6.6 * m, 3.3 * m)
+        ink.line_to(-5.0, 1.3)
         ink.close_path()
         fill(ink, density)
-        # wings: far wing lighter, near wing darker
-        for off, dens, phase in ((-1.2, 0.6, 0.35), (0.6, density, 0.0)):
-            f = math.sin(math.asin(max(-1.0, min(1.0, flap))) + phase)
-            tip_y = lerp(-15.0, 9.0, (f + 1) / 2) * m
-            tip_x = lerp(-5.5, -2.0, (f + 1) / 2)
-            ink.move_to(3.4, -0.4 + off * 0.3)
-            ink.curve_to(2.6, tip_y * 0.5 - 1.0, tip_x + 4.5, tip_y * 0.95, tip_x, tip_y)
-            ink.curve_to(tip_x - 3.8, tip_y * 0.6, -5.0, tip_y * 0.12, -4.2, 0.3 + off * 0.3)
+        elev = 0.95 * max(-1.0, min(1.0, flap))
+        span = 13.5 * math.cos(elev) * (1 - 0.6 * fold) * m
+        sweep = 3.4 + 1.5 * flap + 5.0 * fold
+        for side in (-1, 1):
+            tx, ty = -sweep - 1.0, side * span
+            ink.move_to(2.4, side * 0.9)
+            ink.curve_to(2.6, side * span * 0.5, tx + 4.6, side * span * 0.95, tx, ty)
+            ink.curve_to(tx + 0.2, side * span * 0.62, -3.6, side * span * 0.3, -3.0, side * 0.9)
             ink.close_path()
-            fill(ink, dens * m)
+            fill(ink, density * m)
     ink.restore()
     red.restore()
 
@@ -326,9 +321,10 @@ def bird_state(tb):
     """Bird position/heading/flap at `tb` seconds into the bird act."""
     u = ease_in_out(ramp(tb, 2.1, 10.0))
     (x, y), heading = catmull(BIRD_PATH, u)
-    rate = 1.25
-    amp = 1.0 - 0.55 * smooth(ramp(math.sin(tb * 0.9), 0.4, 1.0))    # glide now and then
-    flap = amp * math.sin(TAU * rate * tb)
+    rate = 1.2
+    amp = 1.0 - 0.45 * smooth(ramp(math.sin(tb * 0.9), 0.4, 1.0))    # glide now and then
+    s = math.sin(TAU * rate * tb)
+    flap = amp * math.copysign(abs(s) ** 0.55, s)      # dwell near the up / down strokes
     return x, y, heading, flap
 
 
@@ -338,7 +334,7 @@ def draw_scene_bird(ink, red, t):
     fade = 1.0 - smooth(ramp(tb, 0.8, 2.6))
     draw_flower(ink, red, 10.0 + tb, opacity=fade, detached=True)
     # the falling petal
-    (hx, hy), ang = flower_petal_tip_state(10.0 + tb)
+    (hx, hy), ang = FL_HEAD, _petal_angle(FALLING_PETAL)
     start = (hx + 8.0 * math.cos(ang), hy + 8.0 * math.sin(ang))
     fall = ease_in_out(ramp(tb, 0.2, 2.1))
     px = lerp(start[0], BIRD_PATH[0][0], fall) + 4.0 * math.sin(tb * 2.6) * (1 - fall)
@@ -466,7 +462,6 @@ def draw_scene_sea(ink, red, t):
     ts = t - T_SEA[0]
     # the bird dives in
     if ts < 1.6:
-        tb = T_BIRD[1] - T_BIRD[0] + ts
         x0, y0, h0, _ = bird_state(T_BIRD[1] - T_BIRD[0])
         dive = ease_in(ramp(ts, 0.0, 1.15))
         x = x0 + 5.0 * dive
@@ -474,7 +469,8 @@ def draw_scene_sea(ink, red, t):
         heading = lerp(h0, 1.25, ease_out(ramp(ts, 0.0, 0.6)))
         vis = 1 - ramp(ts, 1.0, 1.25)
         if vis > 0:
-            draw_bird(ink, red, x, y, heading, -0.9, scale=lerp(BIRD_SCALE, 1.4, dive), density=0.95 * vis, breast=0.9 * vis)
+            draw_bird(ink, red, x, y, heading, 0.0, scale=lerp(BIRD_SCALE, 1.15, dive), density=0.95 * vis,
+                      breast=0.9 * vis, fold=ease_out(ramp(ts, 0.0, 0.7)))
     # splash
     sp = ramp(ts, 1.05, 2.1)
     if 0 < sp < 1:
@@ -504,18 +500,18 @@ def draw_scene_sea(ink, red, t):
 
 # (left, width, height) - heights above the water line
 BUILDINGS = [
-    (29.0, 11.0, 22.0), (40.0, 11.5, 33.0), (51.5, 12.0, 40.0),
-    (63.5, 10.5, 29.0), (74.0, 11.5, 35.0),
+    (28.5, 9.0, 23.0), (40.5, 8.5, 35.0), (52.0, 10.0, 27.0),
+    (65.0, 7.5, 41.0), (75.5, 10.5, 29.0),
 ]
 # (building index, column 0..1, height fraction, light-up time)
 WINDOWS = [
-    (2, 0.30, 0.78, 2.6), (1, 0.55, 0.62, 3.3), (4, 0.40, 0.55, 4.0),
-    (2, 0.68, 0.46, 4.7), (3, 0.50, 0.62, 5.4), (0, 0.50, 0.50, 6.1),
-    (4, 0.62, 0.28, 6.8), (1, 0.30, 0.30, 7.5),
+    (1, 0.50, 0.78, 2.6), (3, 0.50, 0.62, 3.5), (2, 0.35, 0.55, 4.4),
+    (4, 0.45, 0.62, 5.3), (0, 0.50, 0.50, 6.2), (1, 0.45, 0.40, 7.1),
 ]
 WATER_Y = 77.0
-MOON_END = (73.0, 40.0)
-MOON_R = 6.5
+MOON_END = (76.5, 38.5)
+MOON_R = 8.0
+CITY_SOFTNESS_PX = 18.0     # the night city is foggier than the rest
 
 
 def city_rise(tc, i):
@@ -524,15 +520,15 @@ def city_rise(tc, i):
 
 def moon_state(tc):
     u = ease_in_out(ramp(tc, 2.8, 9.6))
-    return (lerp(76.0, MOON_END[0], u), lerp(72.0, MOON_END[1], u)), MOON_R
+    return (lerp(79.0, MOON_END[0], u), lerp(72.0, MOON_END[1], u)), MOON_R
 
 
-def draw_night_sky(ink, amount, moon, moon_r, glow=1.0):
+def draw_night_sky(ink, amount, moon, moon_r):
     if amount <= 0:
         return
     grad = cairo.LinearGradient(0, 28, 0, WATER_Y)
-    grad.add_color_stop_rgba(0.0, 0, 0, 0, 0.50 * amount)
-    grad.add_color_stop_rgba(1.0, 0, 0, 0, 0.16 * amount)
+    grad.add_color_stop_rgba(0.0, 0, 0, 0, 0.42 * amount)
+    grad.add_color_stop_rgba(1.0, 0, 0, 0, 0.12 * amount)
     ink.rectangle(0, 0, 100, WATER_Y + 1)
     ink.set_source(grad)
     ink.fill()
@@ -541,7 +537,7 @@ def draw_night_sky(ink, amount, moon, moon_r, glow=1.0):
         # wash the sky darker around the moon and leave the moon as bare
         # paper - the ink painter's way of drawing a moon
         ring = cairo.RadialGradient(mx, my, moon_r * 0.8, mx, my, moon_r * 2.5)
-        ring.add_color_stop_rgba(0, 0, 0, 0, 0.42 * glow * amount)
+        ring.add_color_stop_rgba(0, 0, 0, 0, 0.75 * amount)
         ring.add_color_stop_rgba(1, 0, 0, 0, 0.0)
         ink.arc(mx, my, moon_r * 2.5, 0, TAU)
         ink.set_source(ring)
@@ -554,9 +550,9 @@ def draw_night_sky(ink, amount, moon, moon_r, glow=1.0):
         ink.restore()
 
 
-def draw_city(ink, tc, sink=0.0, windows_on=1.0):
+def draw_city(ink, tc):
     for i, (left, w, h) in enumerate(BUILDINGS):
-        r = city_rise(tc, i) * (1 - sink)
+        r = city_rise(tc, i)
         if r <= 0:
             continue
         top = WATER_Y - h * r
@@ -564,9 +560,9 @@ def draw_city(ink, tc, sink=0.0, windows_on=1.0):
         fill(ink, 0.95)
     # windows: lifted ink inside the buildings
     for b, col, hf, t_on in WINDOWS:
-        on = smooth(ramp(tc, t_on, t_on + 0.5)) * windows_on
+        on = smooth(ramp(tc, t_on, t_on + 0.5))
         left, w, h = BUILDINGS[b]
-        r = city_rise(tc, b) * (1 - sink)
+        r = city_rise(tc, b)
         if on <= 0 or r < 0.95:
             continue
         top = WATER_Y - h * r
@@ -575,7 +571,7 @@ def draw_city(ink, tc, sink=0.0, windows_on=1.0):
         if wy < top + 1.0:
             continue
         ink.rectangle(wx, wy, 3.4, 4.4)
-        erase(ink, 0.8 * on)
+        erase(ink, 0.7 * on)
 
 
 def draw_scene_city(ink, red, t):
@@ -596,7 +592,7 @@ def draw_scene_city(ink, red, t):
 
 # ===================================================================== EYE
 
-EYE_C = (CX, 57.0)
+EYE_C = (CX, CY)
 EYE_W = 25.0          # half width
 EYE_H = 12.8          # half height when fully open
 IRIS_R = 10.5
@@ -645,6 +641,20 @@ def draw_eye(ink, red, openness, look=(0.0, 0.0), socket=1.0, lid=1.0, iris=1.0,
         g.add_color_stop_rgba(1.0, 0, 0, 0, 0.0)
         ink.set_source(g)
         ink.fill()
+    # upper lid: shading that darkens toward the lid line (one edge, not a
+    # stroke with two)
+    if lid > 0:
+        top = cy - hh * 1.33 - 6.5
+        ink.move_to(cx - width - 1.0, cy + 0.3)
+        ink.curve_to(cx - width * 0.45, top, cx + width * 0.45, top, cx + width + 1.0, cy + 0.3)
+        ink.curve_to(cx + width * 0.45, cy - hh * 1.33, cx - width * 0.45, cy - hh * 1.33,
+                     cx - width - 1.0, cy + 0.3)
+        ink.close_path()
+        g = cairo.LinearGradient(0, cy - hh - 5.5, 0, cy - hh + 0.5)
+        g.add_color_stop_rgba(0.0, 0, 0, 0, 0.0)
+        g.add_color_stop_rgba(1.0, 0, 0, 0, 0.9 * lid)
+        ink.set_source(g)
+        ink.fill()
     # the eye opening: clear the socket, draw iris and pupil inside
     almond(ink, cx, cy, width, max(hh, 0.01), max(hh * 0.82, 0.01))
     erase(ink, 1.0)
@@ -654,34 +664,19 @@ def draw_eye(ink, red, openness, look=(0.0, 0.0), socket=1.0, lid=1.0, iris=1.0,
             ctx.save()
             almond(ctx, cx, cy, width, hh, hh * 0.82)
             ctx.clip()
-        red.arc(ix, iy, IRIS_R, 0, TAU)
-        fill(red, 0.95 * iris)
-        ink.arc(ix, iy, PUPIL_R * (1.0 + 0.12 * ramp(abs(look[0]) + abs(look[1]), 3, 0)), 0, TAU)
+        g = cairo.RadialGradient(ix, iy, 0.0, ix, iy, IRIS_R * 1.12)
+        g.add_color_stop_rgba(0.0, 0, 0, 0, 0.95 * iris)
+        g.add_color_stop_rgba(0.62, 0, 0, 0, 0.95 * iris)
+        g.add_color_stop_rgba(0.86, 0, 0, 0, 0.62 * iris)
+        g.add_color_stop_rgba(1.0, 0, 0, 0, 0.0)
+        red.arc(ix, iy, IRIS_R * 1.12, 0, TAU)
+        red.set_source(g)
+        red.fill()
+        dil = 1.0 + 0.12 * ramp(abs(look[0]) + abs(look[1]), 3, 0)
+        ink.arc(ix, iy, PUPIL_R * dil, 0, TAU)
         fill(ink, 0.97 * iris)
-        # catch-light, soft and generous so it reads through the dot screen
-        ink.arc(ix + 2.4, iy - 2.4, 1.7, 0, TAU)
-        erase(ink, 0.75 * iris)
-        red.arc(ix + 2.4, iy - 2.4, 1.7, 0, TAU)
-        erase(red, 0.75 * iris)
         ink.restore()
         red.restore()
-    # upper lid: a heavy brush line, thinner as it closes
-    if lid > 0:
-        ink.move_to(cx - width - 1.2, cy + 0.4)
-        ink.curve_to(cx - width * 0.45, cy - hh * 1.33 - 2.6, cx + width * 0.45, cy - hh * 1.33 - 2.6,
-                     cx + width + 1.2, cy + 0.4)
-        ink.curve_to(cx + width * 0.45, cy - hh * 1.33 + 1.9, cx - width * 0.45, cy - hh * 1.33 + 1.9,
-                     cx - width - 1.2, cy + 0.4)
-        ink.close_path()
-        fill(ink, 0.95 * lid)
-        # lower lid, lighter
-        ink.move_to(cx - width + 1.5, cy + 0.6)
-        ink.curve_to(cx - width * 0.4, cy + hh * 1.09 + 1.1, cx + width * 0.4, cy + hh * 1.09 + 1.1,
-                     cx + width - 1.5, cy + 0.6)
-        ink.curve_to(cx + width * 0.4, cy + hh * 1.09 - 0.2, cx - width * 0.4, cy + hh * 1.09 - 0.2,
-                     cx - width + 1.5, cy + 0.6)
-        ink.close_path()
-        fill(ink, 0.55 * lid)
 
 
 def draw_scene_eye(ink, red, t):
@@ -731,13 +726,20 @@ SCENES = {
 }
 
 
-def draw(ink, red, t, box=None):
+def softness(t: float) -> float:
+    """Picture blur (px at 1080) over time: the night city is foggier."""
+    base = config.PICTURE_SOFTNESS_PX
+    fog = smooth(ramp(t, T_CITY[0] - 0.5, T_CITY[0] + 1.0)) * (1 - smooth(ramp(t, T_EYE[0], T_EYE[0] + 1.2)))
+    return base + (CITY_SOFTNESS_PX - base) * fog
+
+
+def draw(ink, red, t):
     """Compositor entry point: paint the picture for film time `t`."""
     act = act_at(t)
     fn = SCENES.get(act)
     if fn is not None:
         fn(ink, red, t)
-    return {"act": act}
+    return {"act": act, "softness": softness(t)}
 
 
 def look(t: float) -> compose.Look:

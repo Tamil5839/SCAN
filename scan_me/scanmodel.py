@@ -115,10 +115,12 @@ def zxing_threshold_map(gray: np.ndarray) -> np.ndarray:
         nxt = np.minimum(nxt, nz.size - 1)
         out = out[nz[nxt]]
     out = out.reshape(sh, sw)
-    full = np.repeat(np.repeat(out, _B, axis=0), _B, axis=1)
-    # blocks past the edge were computed from the last full block
-    full = full[:h, :w]
-    return full
+    # each block thresholds its 8x8 pixels; when the size is not a multiple
+    # of 8 the last block is shifted inward and overwrites the overlap
+    py, px = np.arange(h), np.arange(w)
+    by = np.where(py >= h - _B, sh - 1, py // _B)
+    bx = np.where(px >= w - _B, sw - 1, px // _B)
+    return out[np.ix_(by, bx)]
 
 
 def zxing_read(gray: np.ndarray, geo: Geometry, jitter: int = 0):

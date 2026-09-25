@@ -26,13 +26,6 @@ class Segment:
     word: int = 0        # 1-based word position for kind == "word"
     mask: int = -1       # chosen QR mask, filled in by render.py
 
-    @property
-    def frames(self) -> range:
-        return range(self.start, self.end)
-
-    def seconds(self, fps: int) -> tuple:
-        return self.start / fps, self.end / fps
-
 
 def words(sentence: str = None):
     return (sentence or config.SECRET_SENTENCE).split()

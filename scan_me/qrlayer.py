@@ -23,12 +23,6 @@ _EC = {
     "H": consts.ERROR_LEVEL_H,
 }
 
-# segno's verbose module types that carry data (everything else is a
-# function pattern: finders, separators, timing, alignment, format, version
-# and the dark module).
-_DATA_TYPES = (consts.TYPE_DATA_DARK, consts.TYPE_DATA_LIGHT)
-
-
 def make_code(payload: str, version: int, ec: str, mask: int) -> segno.QRCode:
     """Encode `payload` with a forced version, error level and mask.
 
@@ -123,6 +117,15 @@ def _interleaved_owner(version: int, ec: str):
     return owners
 
 
+def alignment_centres(version: int):
+    """(row, col) of every alignment pattern (none overlap a finder)."""
+    if version < 2:
+        return []
+    pos = consts.ALIGNMENT_POS[version - 2]          # table starts at version 2
+    corners = {(pos[0], pos[0]), (pos[0], pos[-1]), (pos[-1], pos[0])}
+    return [(r, c) for r in pos for c in pos if (r, c) not in corners]
+
+
 def function_map(version: int) -> np.ndarray:
     """Function-pattern modules per ISO/IEC 18004, computed from first principles.
 
@@ -140,13 +143,8 @@ def function_map(version: int) -> np.ndarray:
     # timing patterns
     f[6, :] = f[:, 6] = True
     # alignment patterns
-    pos = consts.ALIGNMENT_POS[version - 2] if version > 1 else ()  # table starts at version 2
-    corners = {(pos[0], pos[0]), (pos[0], pos[-1]), (pos[-1], pos[0])} if pos else set()
-    for r in pos:
-        for c in pos:
-            if (r, c) in corners:    # would overlap a finder pattern: not placed
-                continue
-            f[r - 2:r + 3, c - 2:c + 3] = True
+    for r, c in alignment_centres(version):
+        f[r - 2:r + 3, c - 2:c + 3] = True
     # version information
     if version >= 7:
         f[0:6, n - 11:n - 8] = f[n - 11:n - 8, 0:6] = True
@@ -205,10 +203,15 @@ MASK_FUNCTIONS = (
 )
 
 
+def codewords_touched(modules: np.ndarray, lay: Layout) -> np.ndarray:
+    """Per RS block, how many distinct codewords contain a marked module."""
+    marked = modules & (lay.codeword >= 0)
+    counts = np.zeros(lay.n_blocks, dtype=int)
+    for b in range(lay.n_blocks):
+        counts[b] = np.unique(lay.codeword[marked & (lay.block == b)]).size
+    return counts
+
+
 def codeword_errors(read_dark: np.ndarray, true_dark: np.ndarray, lay: Layout) -> np.ndarray:
     """Number of distinct wrong codewords per RS block, given a predicted read."""
-    wrong = (read_dark != true_dark) & (lay.codeword >= 0)
-    errs = np.zeros(lay.n_blocks, dtype=int)
-    for b in range(lay.n_blocks):
-        errs[b] = np.unique(lay.codeword[wrong & (lay.block == b)]).size
-    return errs
+    return codewords_touched(read_dark != true_dark, lay)

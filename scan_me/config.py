@@ -1,8 +1,10 @@
 """SCAN ME - every value here is meant to be edited.
 
 Content, timing and look of the film. Change the text, re-run
-`python render.py` and then `python verify.py`; the QR version, the payload
-schedule and the mask choice are all recomputed from these values.
+`python render.py` and then `python verify.py`; the QR version and the
+payload schedule are recomputed from these values, and the masks are chosen
+again whenever the schedule changes (pass --reselect-masks to render.py after
+changing only the look).
 """
 
 # ----------------------------------------------------------------- content
@@ -22,7 +24,8 @@ SIZE_PX = 1080
 WORD_TEMPLATE = "{i}/{n} - {word}"
 
 # Short fun payloads, each held for WORD_HOLD_SEC at (roughly) the given
-# second. Times snap to the word grid; they sit on the scene transitions.
+# second. Times snap to the word grid; the first three sit on scene
+# transitions.
 BONUS_MESSAGES = [
     ("You paused at the right moment.", 13.0),   # petal becomes a bird
     ("This bird is made of data.", 23.5),        # bird dives into the sea
@@ -48,11 +51,20 @@ QUIET_ZONE = 4          # modules of clean paper around the code
 
 # Dot side as a fraction of the module side.
 #   DOT_FRACTION      smallest dot: a dark module over light paper, i.e. the
-#                     dot that fights the picture. Tuned by `verify.py --tune`.
-#   DOT_FRACTION_MAX  a dark module over dark ink may grow up to this.
+#                     dot that fights the picture. `python verify.py --tune`
+#                     found 0.56 to be the smallest value that passes all
+#                     three passes (0.54 fails OpenCV on 14/360 sampled
+#                     frames, 0.52 on 42). The film ships at 0.60: OpenCV
+#                     compares every module with the symbol's average, so a
+#                     slightly bolder dot on paper saves about a third of the
+#                     ink the safety net would otherwise lift out of the
+#                     picture (and at 0.56 the net enlarges ~23 dots a frame
+#                     anyway).
+#   DOT_FRACTION_MAX  a dark module over dark ink grows up to this (it is
+#                     nearly invisible there and deepens the silhouette).
 #   CLEAN_DOT_FRACTION  dots of the picture-free title and link code.
-DOT_FRACTION = 0.62
-DOT_FRACTION_MAX = 0.70
+DOT_FRACTION = 0.60
+DOT_FRACTION_MAX = 0.80
 CLEAN_DOT_FRACTION = 0.86
 DOT_CORNER = 0.28       # corner radius as a fraction of the dot side
 FINDER_CORNER = 0.22    # outer corner rounding of finder patterns (modules)
@@ -61,17 +73,17 @@ FINDER_CORNER = 0.22    # outer corner rounding of finder patterns (modules)
 # picture is a soft ink wash: its darkest tone stays well above the code's
 # dark dots and its edges are soft. The sharp dot screen supplies the crisp
 # detail.
-PICTURE_INK_MAX = 0.76      # 1.0 would be solid INK; 0.76 ~ luma 78
-PICTURE_SOFTNESS_PX = 11.0  # gaussian sigma of the picture, at 1080 px
+PICTURE_INK_MAX = 0.76      # 1.0 would be solid INK; 0.76 ~ luma 74
+PICTURE_SOFTNESS_PX = 12.0  # gaussian sigma of the picture, at 1080 px
 # Picture fades to paper near the quiet zone and near light function
 # modules (finder separators, timing, format). Distances in modules.
 SAFE_FADE_START = 0.35
-SAFE_FADE_END = 1.6
+SAFE_FADE_END = 2.3
 BORDER_FADE_START = 0.3   # fade toward the quiet zone, modules
-BORDER_FADE_END = 3.0
+BORDER_FADE_END = 3.4
 
 PAPER_GRAIN = 1.0       # grain amplitude in grey levels (keep tiny)
-SEED = 20260925         # every random choice is seeded
+SEED = 20260925         # seeds the paper grain, the only random element
 
 # ------------------------------------------------------- scanner safety net
 # Each frame is checked against models of both reference decoders
@@ -88,6 +100,10 @@ MARGIN_ZXING = 16           # grey-level margin at the module centre (2 px jitte
 SAFE_MAX_ERRORS = 2
 SAFE_MAX_RISKY = 4
 SAFETY_GROW_DOTS = True     # may enlarge a thin dark dot (off while tuning DOT_FRACTION)
+MASK_AGREEMENT_TOLERANCE = 0.50   # see render.choose_mask
+REPAIR_FADE_FRAMES = 6      # repairs fade in/out over this many frames instead of popping
+LIFT_SIGMA = 0.55           # footprint of a picture lift (gaussian sigma, modules)
+LIFT_GAIN = 2.2
 
 # ------------------------------------------------------------------ output
 

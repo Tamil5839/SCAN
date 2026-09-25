@@ -8,3 +8,4 @@ scan_me/output/frame_*.png
 scan_me/output/preview.mp4
 scan_me/output/*.log
 scan_me/output/*.time
+scan_me/output/verification_report_partial.csv

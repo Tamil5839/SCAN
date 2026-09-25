@@ -5,6 +5,11 @@
     python render.py --frame 420     one frame -> output/frame_00420.png
     python render.py --start 14 --end 24 --preview   preview one act
 
+Masks chosen per segment are cached in output/messages.json and reused while
+the payload schedule is unchanged; pass --reselect-masks after changing the
+look or the scenes. --frame renders a single frame in one pass, so its safety
+repairs are not faded over time as in the full render.
+
 Deterministic: the only randomness (paper grain) is seeded in config.py.
 """
 
@@ -60,34 +65,36 @@ def choose_mask(comp: compose.Compositor, seg, fps, version):
 
     Agreement (as specified): sum over data modules of
         (+1 for a dark module, -1 for a light one) * (darkness - 0.5)
-    i.e. dark modules on ink and light modules on paper score. Among masks
-    within 2% of the best agreement, the one the scanner models rate safest
-    on a few sample frames wins (it needs the fewest safety fixes).
+    i.e. dark modules on ink and light modules on paper score. Every mask
+    whose normalised agreement is within MASK_AGREEMENT_TOLERANCE of the best
+    is then rendered on a few frames of the segment with the safety net on,
+    and the one needing the fewest repairs wins: repairs lift ink out of the
+    picture, so fewer repairs keep the picture intact.
     """
-    lay = comp.lay
     dark_avg, frames = _segment_darkness(comp, seg, fps)
     mats = qrlayer.all_mask_matrices(seg.payload, version, config.EC_LEVEL)
-    data = lay.data
+    data = comp.lay.data
     agree = np.array([float(((2.0 * m - 1.0) * (dark_avg - 0.5))[data].sum()) for m in mats])
-    spread = max(agree.max() - agree.min(), 1e-6)
-    candidates = [m for m in range(8) if agree[m] >= agree.max() - 0.02 * spread - 1e-9]
-    if len(candidates) == 1 and dark_avg.max() < 0.05:
-        return candidates[0], agree.tolist(), {}
-    samples = frames[:: max(1, len(frames) // 4)][:4]
-    risk = {}
-    for m in (candidates if len(candidates) > 1 else range(8)):
-        score = 0
-        for f in samples:
-            t = f / fps
-            look = scenes.look(t)
-            pic = comp.render_picture(scenes.draw, t, look) if look.picture > 0 else comp.blank_picture()
-            rgb, _ = comp.frame(pic, mats[m], m, look, safety=False)
-            rep, _ = comp.check(rgb, mats[m])
-            score += rep.risky_codewords + 2 * (rep.cv_block_errors + rep.zx_block_errors)
-        risk[m] = score / len(samples)
-    pool = candidates if len(candidates) > 1 else list(range(8))
-    best = min(pool, key=lambda m: (risk[m], -agree[m]))
-    return best, agree.tolist(), risk
+    norm = (agree - agree.min()) / max(agree.max() - agree.min(), 1e-6)
+    candidates = [m for m in range(8) if norm[m] >= 1.0 - config.MASK_AGREEMENT_TOLERANCE - 1e-9]
+    if len(candidates) == 1 or dark_avg.max() < 0.05:
+        return int(np.argmax(agree)), agree.tolist(), {}
+    k = min(5, len(frames))
+    samples = [frames[int(j * (len(frames) - 1) / max(k - 1, 1))] for j in range(k)]
+    pics = []
+    for f in samples:
+        t = f / fps
+        look = scenes.look(t)
+        pics.append((look, comp.render_picture(scenes.draw, t, look) if look.picture > 0 else comp.blank_picture()))
+    damage = {}
+    for m in candidates:
+        total = 0.0
+        for look, pic in pics:
+            _, rep = comp.frame(pic, mats[m], m, look, safety=True)
+            total += rep.lifted + rep.grown + 4 * max(rep.cv_block_errors, rep.zx_block_errors)
+        damage[m] = total / len(pics)
+    best = min(candidates, key=lambda m: (damage[m], -agree[m]))
+    return best, agree.tolist(), damage
 
 
 def _choose_worker(args):
@@ -123,7 +130,7 @@ def _worker_comp(version, size):
     return _COMP[key]
 
 
-def render_frame(i, segs, version, size=None, safety=True):
+def render_frame(i, segs, version, size=None, safety=True, lift0=None, grow0=None):
     """Render film frame `i`; returns (rgb, SafetyReport, segment, act)."""
     size = size or config.SIZE_PX
     comp = _worker_comp(version, size)
@@ -136,17 +143,51 @@ def render_frame(i, segs, version, size=None, safety=True):
     dark = _MATS[key]
     look = scenes.look(t)
     pic = comp.render_picture(scenes.draw, t, look) if look.picture > 0 else comp.blank_picture()
-    rgb, rep = comp.frame(pic, dark, seg.mask, look, safety=safety)
+    rgb, rep = comp.frame(pic, dark, seg.mask, look, safety=safety, lift0=lift0, grow0=grow0)
     return rgb, rep, seg, scenes.act_at(t)
 
 
+def _repair_worker(args):
+    """Pass 1: only the safety net's repair maps for frame i."""
+    i, segs, version, size = args
+    render_frame(i, segs, version, size, safety=True)
+    lift, grow = _worker_comp(version, size or config.SIZE_PX).last_repair
+    return i, lift.astype(np.float16), grow.astype(np.float16)
+
+
 def _frame_worker(args):
-    i, segs, version, size, safety, png_dir = args
-    rgb, rep, seg, act = render_frame(i, segs, version, size, safety)
+    i, segs, version, size, safety, png_dir, lift0, grow0 = args
+    rgb, rep, seg, act = render_frame(i, segs, version, size, safety, lift0, grow0)
     if png_dir:
         cv2.imwrite(os.path.join(png_dir, f"frame_{i:05d}.png"), cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR),
                     [cv2.IMWRITE_PNG_COMPRESSION, 1])
     return i, rgb.tobytes(), rep, seg.index, act
+
+
+def smooth_repairs(segs, frames, maps, reach=None):
+    """Spread every repair over neighbouring frames of the same segment.
+
+    A module lifted at frame t is lifted with weight 1 - |d|/(reach+1) at
+    t+d, and each frame keeps the maximum, so every frame still carries at
+    least the repair it needs while repairs fade in and out instead of
+    popping. Segments are never crossed: the modules change there anyway.
+    """
+    reach = config.REPAIR_FADE_FRAMES if reach is None else reach
+    out = {}
+    by_seg = {}
+    for i in frames:
+        by_seg.setdefault(schedule.segment_at(segs, i).index, []).append(i)
+    for idx, fr in by_seg.items():
+        fr = sorted(fr)
+        stack = np.stack([maps[i].astype(np.float32) for i in fr])        # (T, n, n)
+        best = stack.copy()
+        for d in range(1, reach + 1):
+            w = 1.0 - d / (reach + 1.0)
+            best[d:] = np.maximum(best[d:], stack[:-d] * w)
+            best[:-d] = np.maximum(best[:-d], stack[d:] * w)
+        for k, i in enumerate(fr):
+            out[i] = best[k]
+    return out
 
 
 def ffmpeg_writer(path, size, fps, crf):
@@ -167,19 +208,27 @@ def make_xtest(src, dst):
 def render_video(segs, version, frames, path, size, fps, jobs, safety=True, png_dir=None, log_path=None):
     if png_dir:
         os.makedirs(png_dir, exist_ok=True)
-    proc = ffmpeg_writer(path, size, fps, config.VIDEO_CRF)
-    tasks = [(i, segs, version, size, safety, png_dir) for i in frames]
-    rows = []
+    lifts = grows = {}
     t0 = time.time()
+    if safety:
+        # pass 1: what each frame needs, then smooth it over time
+        with mp.Pool(jobs) as pool:
+            got = list(pool.imap_unordered(_repair_worker, [(i, segs, version, size) for i in frames], chunksize=2))
+        lifts = smooth_repairs(segs, frames, {i: l for i, l, _ in got})
+        grows = smooth_repairs(segs, frames, {i: g for i, _, g in got})
+        print(f"  repair maps for {len(frames)} frames in {time.time() - t0:.0f}s", flush=True)
+    proc = ffmpeg_writer(path, size, fps, config.VIDEO_CRF)
+    tasks = [(i, segs, version, size, safety, png_dir, lifts.get(i), grows.get(i)) for i in frames]
+    rows = []
     with mp.Pool(jobs) as pool:
         for n, (i, buf, rep, seg_idx, act) in enumerate(pool.imap(_frame_worker, tasks, chunksize=2)):
             proc.stdin.write(buf)
             seg = segs[seg_idx]
             rows.append(dict(frame=i, time=round(i / config.FPS, 3), act=act, segment=seg_idx,
                              payload=seg.payload, mask=seg.mask, **asdict(rep)))
-            if (n + 1) % 60 == 0 or n + 1 == len(tasks):
+            if (n + 1) % 300 == 0 or n + 1 == len(tasks):
                 el = time.time() - t0
-                print(f"  {n + 1}/{len(tasks)} frames  {el:.0f}s  ({el / (n + 1) * 1000:.0f} ms/frame)", flush=True)
+                print(f"  {n + 1}/{len(tasks)} frames  {el:.0f}s", flush=True)
     proc.stdin.close()
     if proc.wait() != 0:
         raise RuntimeError("ffmpeg failed")
@@ -255,16 +304,18 @@ def main(argv=None):
         return 0
 
     frames = list(range(first, last))
-    path = out_path("scan_me.mp4")
+    full = first == 0 and last == total
+    tag = "" if full else f"_{first / fps:g}-{last / fps:g}s"
+    path = out_path(f"scan_me{tag}.mp4")
     png_dir = None if args.no_png else out_path("frames")
     print(f"rendering {len(frames)} frames -> {path}")
     rows = render_video(segs, version, frames, path, config.SIZE_PX, fps, args.jobs,
-                        safety=not args.no_safety, png_dir=png_dir, log_path=out_path("render_log.csv"))
+                        safety=not args.no_safety, png_dir=png_dir, log_path=out_path(f"render_log{tag}.csv"))
     fixed = sum(1 for r in rows if r["lifted"] or r["grown"])
     print(f"safety net touched {fixed}/{len(rows)} frames; "
           f"worst predicted codeword errors per block: opencv {max(r['cv_block_errors'] for r in rows)}, "
           f"zxing {max(r['zx_block_errors'] for r in rows)}")
-    if first == 0 and last == total:
+    if full:
         xt = out_path("scan_me_x_test.mp4")
         make_xtest(path, xt)
         print(f"x-test copy -> {xt}")

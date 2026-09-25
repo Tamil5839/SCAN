@@ -20,11 +20,12 @@ from __future__ import annotations
 
 import argparse
 import csv
-import json
 import multiprocessing as mp
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 
 import cv2
@@ -44,8 +45,13 @@ DEG_NAMES = list(readers.DEGRADATIONS)
 def _ab_worker(args):
     i, path, expected, do_a, do_b, with_zbar = args
     img = cv2.imread(path, cv2.IMREAD_COLOR)
-    if img is None:
-        return i, {"error": f"missing {path}"}
+    if img is None:                      # a missing frame fails, it is never skipped
+        row = {"error": f"missing {os.path.basename(path)}"}
+        if do_a:
+            row["A_pass"] = False
+        if do_b:
+            row["B_pass"] = False
+        return i, row
     img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     row = {}
     if do_a:
@@ -68,7 +74,7 @@ def _ab_worker(args):
 # ------------------------------------------------------------------ pass C
 
 def _c_worker(args):
-    i, buf, size, expected, with_opencv = args
+    i, buf, size, with_opencv = args
     img = np.frombuffer(buf, np.uint8).reshape(size, size, 3)
     z = readers.zxing(img)
     o = readers.opencv(img) if with_opencv else None
@@ -96,8 +102,7 @@ def video_frames(path):
 
 def pass_c(video, segs, jobs, with_opencv=True):
     results = {}
-    tasks = ((i, buf, size, schedule.segment_at(segs, i).payload, with_opencv)
-             for i, buf, size in video_frames(video))
+    tasks = ((i, buf, size, with_opencv) for i, buf, size in video_frames(video))
     with mp.Pool(jobs) as pool:
         for i, z, o in pool.imap_unordered(_c_worker, tasks, chunksize=4):
             results[i] = (z, o)
@@ -165,7 +170,9 @@ def run(passes="ABC", jobs=None, frames_dir=None, stride=1, videos=None, report_
             rows[i]["safety_grown"] = r["grown"]
 
     ordered = [rows[i] for i in frames]
-    report_path = report_path or render.out_path("verification_report.csv")
+    full = stride == 1 and set(passes) >= set("ABC")
+    report_path = report_path or render.out_path("verification_report.csv" if full
+                                                 else "verification_report_partial.csv")
     keys = []
     for r in ordered:
         for k in r:
@@ -184,8 +191,7 @@ def summarize(ordered, segs, passes):
     lines = []
 
     def rate(key):
-        vals = [bool(r.get(key)) for r in ordered if key in r]
-        return sum(vals), len(vals)
+        return sum(bool(r.get(key)) for r in ordered), n
 
     if "A" in passes:
         a, na = rate("A_pass")
@@ -217,14 +223,15 @@ def summarize(ordered, segs, passes):
     return ok, lines
 
 
-def reconstruction_lines(ordered, segs):
+def reconstruction_lines(ordered, segs, stride=1):
     """What a viewer gets by scanning the film in order (from the main video if available)."""
     key = "C_main_zxing" if "C_main_zxing" in ordered[0] else "A_zxing"
     decoded = [r.get(key, "") for r in ordered]
     sentence = schedule.reconstruct_sentence(decoded)
     last = decoded[-1] if decoded else ""
+    note = "" if stride == 1 else f"  (every {stride}th frame only: words may be missed)"
     return [
-        f"hidden sentence rebuilt from decoded frames: {sentence!r}",
+        f"hidden sentence rebuilt from decoded frames: {sentence!r}{note}",
         f"  matches SECRET_SENTENCE: {sentence == config.SECRET_SENTENCE}",
         f"final frame decodes to: {last!r}  (FINAL_URL match: {last == config.FINAL_URL})",
     ]
@@ -254,7 +261,6 @@ def tune(candidates, stride, jobs):
     """Render every `stride`-th frame at each DOT_FRACTION (safety net may
     lift the picture but may not enlarge dots) and run passes A, B and a
     compressed-video check; report the smallest value that passes 100%."""
-    import tempfile
     results = []
     for f in candidates:
         config.DOT_FRACTION = f
@@ -270,20 +276,19 @@ def tune(candidates, stride, jobs):
                             safety=True, png_dir=tmp)
         xt = os.path.join(tmp, "tune_x_test.mp4")
         render.make_xtest(video, xt)
-        # map video frame k -> film frame frames[k]
-        ok_a = ok_b = ok_c = 0
         ordered, _ = run("AB", jobs, frames_dir=tmp, stride=stride, quiet=True,
                          report_path=os.path.join(tmp, "report.csv"))
         ok_a = sum(bool(r.get("A_pass")) for r in ordered)
         ok_b = sum(bool(r.get("B_pass")) for r in ordered)
-        for path in (video, xt):
+        ok_c = 0
+        for path in (video, xt):                 # video frame k is film frame frames[k]
             dec = {}
             with mp.Pool(jobs) as pool:
-                tasks = ((k, buf, size, "", False) for k, buf, size in video_frames(path))
+                tasks = ((k, buf, size, False) for k, buf, size in video_frames(path))
                 for k, z, _ in pool.imap_unordered(_c_worker, tasks, chunksize=4):
                     dec[k] = z
-            good = sum(dec.get(k) == schedule.segment_at(segs, fr).payload for k, fr in enumerate(frames))
-            ok_c += good
+            ok_c += sum(dec.get(k) == schedule.segment_at(segs, fr).payload for k, fr in enumerate(frames))
+        shutil.rmtree(tmp, ignore_errors=True)
         n = len(frames)
         passed = ok_a == n and ok_b == n and ok_c == 2 * n
         results.append((f, passed, ok_a, ok_b, ok_c, n))
@@ -303,7 +308,7 @@ def main(argv=None):
     ap.add_argument("--jobs", type=int, default=max(1, os.cpu_count() or 2))
     ap.add_argument("--stride", type=int, default=1, help="check every n-th frame (A/B)")
     ap.add_argument("--tune", action="store_true", help="search the smallest passing DOT_FRACTION")
-    ap.add_argument("--candidates", default="0.50,0.54,0.58,0.62,0.66")
+    ap.add_argument("--candidates", default="0.52,0.54,0.56,0.58,0.60")
     args = ap.parse_args(argv)
 
     if args.tune:
@@ -316,8 +321,10 @@ def main(argv=None):
     ok, lines = summarize(ordered, segs, passes)
     print()
     print("\n".join(lines))
-    print("\n".join(reconstruction_lines(ordered, segs)))
-    print(f"report -> {render.out_path('verification_report.csv')}  ({time.time() - t0:.0f}s)")
+    print("\n".join(reconstruction_lines(ordered, segs, args.stride)))
+    name = "verification_report.csv" if args.stride == 1 and set(passes) >= set("ABC") \
+        else "verification_report_partial.csv"
+    print(f"report -> {render.out_path(name)}  ({time.time() - t0:.0f}s)")
     print("ALL PASSES 100%" if ok else "NOT FINISHED: some frames fail")
     print(MANUAL_CHECKLIST)
     return 0 if ok else 1

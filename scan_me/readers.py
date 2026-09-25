@@ -45,9 +45,6 @@ def zbar(img: np.ndarray) -> str | None:
     return res[0].data.decode("utf-8", "replace") if res else ""
 
 
-DECODERS = {"zxing": zxing, "opencv": opencv}
-
-
 # ---------------------------------------------------------------- degradations
 
 def _paper_bgr(img):
